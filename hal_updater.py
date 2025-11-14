@@ -151,4 +151,123 @@ def fetch_konya_for_date(date_str: str):
     text = resp.text
     reader = csv.DictReader(text.splitlines())
 
-    rows_for_
+    rows_for_day = []
+    for row in reader:
+        raw_date = row.get("tarih") or row.get("TARIH")
+        if not raw_date:
+            continue
+
+        day = str(raw_date).strip()[:10]
+        if day != date_str:
+            continue
+
+        product = row.get("urun_ad") or row.get("URUN_AD")
+        unit = row.get("birim") or row.get("BIRIM") or "KG"
+        min_price = parse_price(row.get("en_dusuk_fiyat"))
+        max_price = parse_price(row.get("en_yuksek_fiyat"))
+
+        if not product or (min_price is None and max_price is None):
+            continue
+
+        if min_price is not None and max_price is not None:
+            price = (min_price + max_price) / 2.0
+        else:
+            price = min_price or max_price
+
+        rows_for_day.append(
+            {
+                "product": product,
+                "unit": unit,
+                "price": price,
+            }
+        )
+
+    print(f"[INFO] Konya için {len(rows_for_day)} kayıt bulundu ({date_str})")
+    return rows_for_day
+
+
+def fetch_konya():
+    today = datetime.now()
+    for delta in range(0, 3):
+        date = today - timedelta(days=delta)
+        date_str = date.strftime("%Y-%m-%d")
+        items = fetch_konya_for_date(date_str)
+        if items:
+            return items, date_str
+
+    print("[WARN] Konya için son 3 günde veri bulunamadı.")
+    return [], today_str()
+
+
+# ----------------------------------------------------
+# 5) Şehir bazlı router
+# ----------------------------------------------------
+def fetch_hal_data_for_city(city: str):
+    if city == "İzmir":
+        return fetch_izmir()
+
+    if city == "Konya":
+        return fetch_konya()
+
+    print(f"[WARN] {city} için henüz gerçek veri kaynağı tanımlı değil.")
+    return [], today_str()
+
+
+# ----------------------------------------------------
+# 6) Firestore'a yazan kısım
+# ----------------------------------------------------
+def normalize_doc_id(name: str) -> str:
+    return (
+        name.lower()
+        .replace(" ", "_")
+        .replace("ğ", "g")
+        .replace("ü", "u")
+        .replace("ş", "s")
+        .replace("ı", "i")
+        .replace("ö", "o")
+        .replace("ç", "c")
+        .replace("/", "_")
+        .replace("\\", "_")
+    )
+
+
+def push_city_prices(db, city: str):
+    items, date_str = fetch_hal_data_for_city(city)
+
+    if not items:
+        print(f"[WARN] {city} için yazılacak veri bulunamadı.")
+        return
+
+    batch = db.batch()
+
+    for item in items:
+        product_name = item["product"]
+        unit = item.get("unit", "KG")
+        price = float(item["price"])
+
+        doc_id = normalize_doc_id(product_name)
+        doc_ref = (
+            db.collection("halPrices")
+            .document(city)
+            .collection(date_str)
+            .document(doc_id)
+        )
+
+        data = {
+            "product": product_name,
+            "unit": unit,
+            "price": price,
+            "city": city,
+            "date": date_str,
+        }
+
+        batch.set(doc_ref, data)
+        print(f"[OK] {city} - {product_name} kaydedildi (doc_id={doc_id})")
+
+    batch.commit()
+    print(f"[INFO] {city} için toplam {len(items)} kayıt yazıldı ({date_str}).")
+
+
+# ----------------------------------------------------
+# 7) main
+#
