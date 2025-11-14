@@ -1,0 +1,29 @@
+name: Update Hal Prices
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # Her gün 03:00 UTC (Türkiye saatiyle sabah 06:00 civarı)
+  workflow_dispatch:       # İstediğinde manuel çalıştırmak için
+
+jobs:
+  run-updater:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run updater script
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          python hal_updater.py
