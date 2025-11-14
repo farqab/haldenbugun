@@ -12,15 +12,10 @@ from firebase_admin import credentials, firestore
 # 1) Firebase Admin başlatma
 # ----------------------------------------------------
 def init_firebase():
-    service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
-    if not service_account_json:
-        raise RuntimeError(
-            "FIREBASE_SERVICE_ACCOUNT_JSON env değişkeni tanımlı değil."
-        )
-
-    cred_dict = json.loads(service_account_json)
-    cred = credentials.Certificate(cred_dict)
-    firebase_admin.initialize_app(cred)
+    # Aynı process içinde 2 kere initialize etmeye çalışma
+    if not firebase_admin._apps:
+        cred = credentials.Certificate("firebase-key.json")
+        firebase_admin.initialize_app(cred)
     return firestore.client()
 
 
