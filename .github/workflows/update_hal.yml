@@ -2,8 +2,8 @@ name: Update Hal Prices
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # Her gün 03:00 UTC (Türkiye saatiyle sabah 06:00 civarı)
-  workflow_dispatch:       # İstediğinde manuel çalıştırmak için
+    - cron: "0 3 * * *"   # Her gün 03:00 UTC (TR için 06:00)
+  workflow_dispatch:
 
 jobs:
   run-updater:
@@ -22,8 +22,13 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Run updater script
+      # 🔥 BURASI YENİ: Secret'tan firebase-key.json oluşturan step
+      - name: Create firebase-key.json from secret
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          echo "$FIREBASE_SERVICE_ACCOUNT_JSON" > firebase-key.json
+
+      - name: Run updater script
         run: |
           python hal_updater.py
