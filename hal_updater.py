@@ -1,280 +1,164 @@
-import csv
-import json
 import os
-from datetime import datetime, timedelta
+import json
+import re
+from datetime import datetime, timezone
+
+import requests
+from bs4 import BeautifulSoup
 
 import firebase_admin
-import requests
 from firebase_admin import credentials, firestore
 
 
-# ----------------------------------------------------
-# 1) Firebase Admin başlatma
-# ----------------------------------------------------
+# ---------------- FIREBASE ---------------- #
+
 def init_firebase():
-    # Aynı process içinde 2 kere initialize etmeye çalışma
+    """
+    GitHub Actions'tan gelen FIREBASE_SERVICE_ACCOUNT_JSON
+    env değişkeni ile Firebase Admin başlatır.
+    """
+    raw = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        raise RuntimeError("FIREBASE_SERVICE_ACCOUNT_JSON env değişkeni yok!")
+
+    cred_dict = json.loads(raw)
+
+    # Burada servis hesabı JSON'u kullanıyoruz, içinde "type": "service_account" olmalı
+    cred = credentials.Certificate(cred_dict)
+
     if not firebase_admin._apps:
-        cred = credentials.Certificate("firebase-key.json")
         firebase_admin.initialize_app(cred)
+
     return firestore.client()
 
 
-# ----------------------------------------------------
-# 2) Ortak yardımcı fonksiyonlar
-# ----------------------------------------------------
-def parse_price(value):
-    """Fiyat değerlerini güvenli biçimde float'a çevirir."""
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
+# --------------- ORTAK YARDIMCI FONKSİYONLAR --------------- #
 
-    s = str(value).strip()
-    if "," in s and s.count(",") == 1 and "." not in s:
-        s = s.replace(".", "").replace(",", ".")
+def to_float(val: str) -> float | None:
+    """
+    "40 ₺", "4.6 TL", "5,12 TL" gibi değerleri float'a çevirir.
+    Çeviremezse None döner.
+    """
+    if not val:
+        return None
+
+    # Boşluk ve para birimi atanır
+    cleaned = (
+        val.replace("₺", "")
+           .replace("TL", "")
+           .replace("tl", "")
+           .replace("\xa0", " ")
+           .strip()
+    )
+
+    # Türkçe virgül -> nokta
+    cleaned = cleaned.replace(".", "").replace(",", ".") if cleaned.count(",") == 1 else cleaned.replace(",", ".")
+
     try:
-        return float(s)
+        return float(cleaned)
     except ValueError:
         return None
 
 
-def today_str():
-    return datetime.now().strftime("%Y-%m-%d")
+# --------------- SCRAPER: GUNCELFIYATLARI.COM --------------- #
 
+def scrape_antalya():
+    """
+    Antalya hal fiyatlarını guncelfiyatlari.com'dan çeker.
+    URL: https://www.guncelfiyatlari.com/antalya-hal-fiyatlari/
+    Çıktı: [{"product": ..., "unit": ..., "min": ..., "max": ...}, ...]
+    """
+    url = "https://www.guncelfiyatlari.com/antalya-hal-fiyatlari/"
+    print(f"[SCRAPER] Antalya -> {url}")
 
-# ----------------------------------------------------
-# 3) İZMİR – Güncel Sebze/Meyve Hal Fiyatları API
-# ----------------------------------------------------
-IZMIR_HAL_API_URL = (
-    "https://openapi.izmir.bel.tr/api/ibb/halfiyatlari/sebzemeyve/{date}"
-)
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
 
+    soup = BeautifulSoup(resp.text, "html.parser")
+    text = soup.get_text("\n", strip=True)
+    lines = [l.replace("\xa0", " ").strip() for l in text.splitlines()]
 
-def fetch_izmir_for_date(date_str: str):
-    url = IZMIR_HAL_API_URL.format(date=date_str)
-    print(f"[INFO] İzmir API isteği: {url}")
+    items = []
 
-    try:
-        resp = requests.get(url, timeout=20)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"[WARN] İzmir API isteği başarısız: {e}")
-        return []
-
-    try:
-        data = resp.json()
-    except Exception as e:
-        print(f"[WARN] İzmir API JSON parse hatası: {e}")
-        return []
-
-    if isinstance(data, dict):
-        items = (
-            data.get("data")
-            or data.get("Data")
-            or data.get("result")
-            or data.get("Result")
-            or []
-        )
-    else:
-        items = data
-
-    normalized = []
-    for row in items:
-        product = (
-            row.get("MAL_ADI")
-            or row.get("mal_adi")
-            or row.get("malAdi")
-            or row.get("URUN_ADI")
-            or row.get("urun_adi")
-        )
-        unit = row.get("BIRIM") or row.get("birim") or "KG"
-        avg_price = (
-            row.get("ORTALAMA_UCRET")
-            or row.get("ortalama_ucret")
-            or row.get("ORTALAMA_FIYAT")
-            or row.get("ortalama_fiyat")
-        )
-        price = parse_price(avg_price)
-
-        if not product or price is None:
+    for line in lines:
+        # Satırda ₺ yoksa geç
+        if "₺" not in line:
             continue
 
-        normalized.append(
-            {
-                "product": product,
-                "unit": unit,
-                "price": price,
-            }
-        )
-
-    print(f"[INFO] İzmir için {len(normalized)} kayıt bulundu ({date_str})")
-    return normalized
-
-
-def fetch_izmir():
-    today = datetime.now()
-    for delta in range(0, 3):  # bugün, dün, evvelsi gün
-        date = today - timedelta(days=delta)
-        date_str = date.strftime("%Y-%m-%d")
-        items = fetch_izmir_for_date(date_str)
-        if items:
-            return items, date_str
-
-    print("[WARN] İzmir için son 3 günde veri bulunamadı.")
-    return [], today_str()
-
-
-# ----------------------------------------------------
-# 4) KONYA – Açık Veri CSV
-# ----------------------------------------------------
-KONYA_CSV_URL = (
-    "https://acikveri.konya.bel.tr/dataset/"
-    "0a341ce8-4369-4d91-93d7-a302298275ad/resource/"
-    "532c336b-b3b4-42f9-ae46-44d0597e3ff9/download/hal_fiyatlari.csv"
-)
-
-
-def fetch_konya_for_date(date_str: str):
-    print(f"[INFO] Konya CSV isteği: {KONYA_CSV_URL}")
-    try:
-        resp = requests.get(KONYA_CSV_URL, timeout=30)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"[WARN] Konya CSV isteği başarısız: {e}")
-        return []
-
-    text = resp.text
-    reader = csv.DictReader(text.splitlines())
-
-    rows_for_day = []
-    for row in reader:
-        raw_date = row.get("tarih") or row.get("TARIH")
-        if not raw_date:
+        # 80 ₺ 190 ₺ gibi iki fiyat yakala
+        m = re.search(r"(\d+[.,]?\d*)\s*₺\s+(\d+[.,]?\d*)\s*₺", line)
+        if not m:
             continue
 
-        day = str(raw_date).strip()[:10]
-        if day != date_str:
+        min_raw, max_raw = m.group(1), m.group(2)
+        min_price = to_float(min_raw)
+        max_price = to_float(max_raw)
+
+        # Fiyatlardan önceki kısım: "Ahududu Pk/125 G"
+        prefix = line[:m.start()].strip()
+        parts = prefix.split()
+        if len(parts) < 2:
             continue
 
-        product = row.get("urun_ad") or row.get("URUN_AD")
-        unit = row.get("birim") or row.get("BIRIM") or "KG"
-        min_price = parse_price(row.get("en_dusuk_fiyat"))
-        max_price = parse_price(row.get("en_yuksek_fiyat"))
+        unit = parts[-1]
+        product = " ".join(parts[:-1])
 
-        if not product or (min_price is None and max_price is None):
-            continue
-
-        if min_price is not None and max_price is not None:
-            price = (min_price + max_price) / 2.0
-        else:
-            price = min_price or max_price
-
-        rows_for_day.append(
-            {
-                "product": product,
-                "unit": unit,
-                "price": price,
-            }
-        )
-
-    print(f"[INFO] Konya için {len(rows_for_day)} kayıt bulundu ({date_str})")
-    return rows_for_day
-
-
-def fetch_konya():
-    today = datetime.now()
-    for delta in range(0, 3):
-        date = today - timedelta(days=delta)
-        date_str = date.strftime("%Y-%m-%d")
-        items = fetch_konya_for_date(date_str)
-        if items:
-            return items, date_str
-
-    print("[WARN] Konya için son 3 günde veri bulunamadı.")
-    return [], today_str()
-
-
-# ----------------------------------------------------
-# 5) Şehir bazlı router
-# ----------------------------------------------------
-def fetch_hal_data_for_city(city: str):
-    if city == "İzmir":
-        return fetch_izmir()
-
-    if city == "Konya":
-        return fetch_konya()
-
-    print(f"[WARN] {city} için henüz gerçek veri kaynağı tanımlı değil.")
-    return [], today_str()
-
-
-# ----------------------------------------------------
-# 6) Firestore'a yazan kısım
-# ----------------------------------------------------
-def normalize_doc_id(name: str) -> str:
-    return (
-        name.lower()
-        .replace(" ", "_")
-        .replace("ğ", "g")
-        .replace("ü", "u")
-        .replace("ş", "s")
-        .replace("ı", "i")
-        .replace("ö", "o")
-        .replace("ç", "c")
-        .replace("/", "_")
-        .replace("\\", "_")
-    )
-
-
-def push_city_prices(db, city: str):
-    items, date_str = fetch_hal_data_for_city(city)
-
-    if not items:
-        print(f"[WARN] {city} için yazılacak veri bulunamadı.")
-        return
-
-    batch = db.batch()
-
-    for item in items:
-        product_name = item["product"]
-        unit = item.get("unit", "KG")
-        price = float(item["price"])
-
-        doc_id = normalize_doc_id(product_name)
-        doc_ref = (
-            db.collection("halPrices")
-            .document(city)
-            .collection(date_str)
-            .document(doc_id)
-        )
-
-        data = {
-            "product": product_name,
+        items.append({
+            "product": product,
             "unit": unit,
-            "price": price,
-            "city": city,
-            "date": date_str,
-        }
+            "min": min_price,
+            "max": max_price,
+        })
 
-        batch.set(doc_ref, data)
-        print(f"[OK] {city} - {product_name} kaydedildi (doc_id={doc_id})")
-
-    batch.commit()
-    print(f"[INFO] {city} için toplam {len(items)} kayıt yazıldı ({date_str}).")
+    print(f"[SCRAPER] Antalya: {len(items)} satır bulundu.")
+    return items
 
 
-# ----------------------------------------------------
-# 7) main
-# ----------------------------------------------------
-def main():
-    db = init_firebase()
+def scrape_mersin():
+    """
+    Mersin hal fiyatlarını guncelfiyatlari.com'dan çeker.
+    URL: https://www.guncelfiyatlari.com/mersin-hal-fiyatlari/
+    Çıktı: [{"product": ..., "unit": ..., "min": ..., "max": ...}, ...]
+    """
+    url = "https://www.guncelfiyatlari.com/mersin-hal-fiyatlari/"
+    print(f"[SCRAPER] Mersin -> {url}")
 
-    # Şu an gerçek veri bağladığımız şehirler:
-    cities = ["İzmir", "Konya"]
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
 
-    for city in cities:
-        push_city_prices(db, city)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    text = soup.get_text("\n", strip=True)
+    lines = [l.replace("\xa0", " ").strip() for l in text.splitlines()]
 
+    items = []
 
-if __name__ == "__main__":
-    main()
+    for line in lines:
+        # Satırda "TL" yoksa geç
+        if "TL" not in line:
+            continue
+
+        # 4.6 TL 6 TL gibi iki fiyat yakala
+        m = re.search(r"(\d+[.,]?\d*)\s*TL\s+(\d+[.,]?\d*)\s*TL", line)
+        if not m:
+            continue
+
+        min_raw, max_raw = m.group(1), m.group(2)
+        min_price = to_float(min_raw)
+        max_price = to_float(max_raw)
+
+        # Fiyatlardan önceki kısımda ürün adı / tür vs var
+        prefix = line[:m.start()].strip()
+        tokens = prefix.split()
+
+        # Mersin satırı: ŞUBE ÜRÜN CİNSİ TÜRÜ ...
+        # Çok kasmadan 2. ve 3. kelimeyi ürün ismi olarak alalım
+        if len(tokens) >= 3:
+            product = f"{tokens[1]} {tokens[2]}"
+        elif len(tokens) >= 2:
+            product = tokens[1]
+        else:
+            product = tokens[0]
+
+        # Satırın sonunda birim: KİLOGRAM, ADET, BAĞ vs
+        suffix = line[m.end():].strip()
+        unit = suffix.split()[-1] if suffix else
