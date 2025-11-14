@@ -34,7 +34,7 @@ def init_firebase():
 
 # --------------- ORTAK YARDIMCI FONKSİYONLAR --------------- #
 
-def to_float(val: str) -> float | None:
+def to_float(val: str):
     """
     "40 ₺", "4.6 TL", "5,12 TL" gibi değerleri float'a çevirir.
     Çeviremezse None döner.
@@ -161,4 +161,75 @@ def scrape_mersin():
 
         # Satırın sonunda birim: KİLOGRAM, ADET, BAĞ vs
         suffix = line[m.end():].strip()
-        unit = suffix.split()[-1] if suffix else
+        unit = suffix.split()[-1] if suffix else ""
+
+        items.append({
+            "product": product,
+            "unit": unit,
+            "min": min_price,
+            "max": max_price,
+        })
+
+    print(f"[SCRAPER] Mersin: {len(items)} satır bulundu.")
+    return items
+
+
+# ----------- TÜM ŞEHİRLERİ TOPLAYAN FONKSİYON ----------- #
+
+def collect_all_cities():
+    data = {}
+    try:
+        data["Antalya"] = scrape_antalya()
+    except Exception as e:
+        print(f"[HATA] Antalya verisi çekilirken hata: {e}")
+
+    try:
+        data["Mersin"] = scrape_mersin()
+    except Exception as e:
+        print(f"[HATA] Mersin verisi çekilirken hata: {e}")
+    return data
+
+
+# --------------- FIRESTORE'A YAZMA --------------- #
+
+def save_to_firestore(db, all_city_data: dict):
+    """
+    Firestore yapısı:
+
+    halPrices (collection)
+      ├─ Antalya (document)
+      │    ├─ date: "2025-11-14"
+      │    └─ items: [ {product, unit, min, max}, ... ]
+      └─ Mersin  (document)
+           ├─ date: "2025-11-14"
+           └─ items: [ ... ]
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    col = db.collection("halPrices")
+
+    for city_name, items in all_city_data.items():
+        if not items:
+            print(f"[FIRESTORE] {city_name}: veri yok, atlanıyor.")
+            continue
+
+        doc_ref = col.document(city_name)
+        payload = {
+            "date": today,
+            "items": items
+        }
+        doc_ref.set(payload)
+        print(f"[FIRESTORE] {city_name}: {len(items)} satır yazıldı.")
+
+
+# --------------- MAIN --------------- #
+
+def main():
+    print("=== Hal Updater Çalıştı ===")
+    db = init_firebase()
+    all_data = collect_all_cities()
+    save_to_firestore(db, all_data)
+    print("=== Bitti ===")
+
+
+if __name__ == "__main__":
+    main()
