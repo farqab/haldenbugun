@@ -268,5 +268,18 @@ def push_city_prices(db, city: str):
     print(f"[INFO] {city} için toplam {len(items)} kayıt yazıldı ({date_str}).")
 
 
+# ----------------------------------------------------
+# 7) main
+# ----------------------------------------------------
+def main():
+    db = init_firebase()
+
+    # Şu an gerçek veri bağladığımız şehirler:
+    cities = ["İzmir", "Konya"]
+
+    for city in cities:
+        push_city_prices(db, city)
+
+
 if __name__ == "__main__":
     main()
