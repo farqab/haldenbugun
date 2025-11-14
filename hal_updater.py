@@ -268,6 +268,5 @@ def push_city_prices(db, city: str):
     print(f"[INFO] {city} için toplam {len(items)} kayıt yazıldı ({date_str}).")
 
 
-# ----------------------------------------------------
-# 7) main
-#
+if __name__ == "__main__":
+    main()
