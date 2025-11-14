@@ -6,10 +6,6 @@ import os
 
 
 def init_firebase():
-    """
-    GitHub Actions ortamında, FIREBASE_SERVICE_ACCOUNT_JSON
-    adlı secret'tan gelen JSON string'i kullanarak Firebase Admin'i başlatır.
-    """
     service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
     if not service_account_json:
         raise RuntimeError(
@@ -23,9 +19,6 @@ def init_firebase():
 
 
 def fetch_hal_data_for_city(city: str):
-    """
-    Şimdilik dummy veriler. Sonraki adımda CollectAPI / belediye API'si ile değiştireceğiz.
-    """
     if city == "Antalya":
         return [
             {"product": "Domates", "unit": "KG", "price": 12.5},
@@ -42,17 +35,11 @@ def fetch_hal_data_for_city(city: str):
 
 
 def push_city_prices(db, city: str):
-    """
-    Verilen şehir için verileri Firestore'a yazar.
-    Koleksiyon yapısı:
-    halPrices / {city} / {yyyy-MM-dd} / {productId}
-    """
     today = datetime.now().strftime("%Y-%m-%d")
     items = fetch_hal_data_for_city(city)
 
     for item in items:
-        doc_id = item["product"].lower()  # domates, salatalık...
-
+        doc_id = item["product"].lower()
         doc_ref = (
             db.collection("halPrices")
             .document(city)
